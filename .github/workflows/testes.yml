@@ -1,0 +1,29 @@
+name: Testes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-powershell-51:
+    name: Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rodar testes
+        shell: powershell
+        run: .\tests\Testar.ps1
+
+  powershell-7:
+    name: PowerShell 7 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rodar testes
+        shell: pwsh
+        run: ./tests/Testar.ps1
