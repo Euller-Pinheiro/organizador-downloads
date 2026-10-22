@@ -16,14 +16,22 @@
 .PARAMETER Pasta
     Pasta a organizar. Padrão: Downloads do usuário.
 
+.PARAMETER Simular
+    Só simula (é o padrão). Existe para deixar a intenção explícita em atalhos e
+    tarefas agendadas. Não pode ser usado junto com -Executar.
+
 .PARAMETER Executar
     Sem ele, nada é movido (simulação).
+
+.PARAMETER AbrirRelatorio
+    Abre o relatório HTML no navegador padrão ao terminar.
 
 .PARAMETER SemVersoes
     Não separa versões antigas (mantém v1, v2, v3... lado a lado).
 
 .EXAMPLE
     .\Organizar-Downloads.ps1                 # simulação
+    .\Organizar-Downloads.ps1 -Simular -AbrirRelatorio   # simula e abre o relatório
     .\Organizar-Downloads.ps1 -Executar       # organiza de verdade
 
 .LINK
@@ -32,11 +40,16 @@
 [CmdletBinding()]
 param(
     [string]$Pasta = (Join-Path $HOME 'Downloads'),
+    [switch]$Simular,
     [switch]$Executar,
-    [switch]$SemVersoes
+    [switch]$SemVersoes,
+    [switch]$AbrirRelatorio
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Simular -and $Executar) {
+    throw 'Use -Simular OU -Executar, não os dois. Sem nenhum deles, o padrão é simular.'
+}
 $Pasta = (Resolve-Path -LiteralPath $Pasta).Path
 $PastaLog = Join-Path $Pasta '_Organização'
 $Agora = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -129,6 +142,158 @@ function Destino-Livre([string]$dir, [string]$nome) {
 function Caminho-Local([string]$rel) { Join-Path $Pasta ($rel -replace '\\', [IO.Path]::DirectorySeparatorChar) }
 
 # ============================================================================
+#  RELATÓRIO HTML
+#  Uma página só, sem JavaScript e sem nada externo: abre em qualquer navegador,
+#  pode ir por e-mail e imprime bem. Todo texto vindo de nome de arquivo passa
+#  por HtmlEncode — um arquivo chamado "<script>.txt" não pode virar código.
+# ============================================================================
+$PtBr = [Globalization.CultureInfo]::GetCultureInfo('pt-BR')
+
+function Html([string]$t) { [Net.WebUtility]::HtmlEncode($t) }
+
+function Formatar-Tamanho([int64]$bytes) {
+    $unidades = @('B', 'KB', 'MB', 'GB', 'TB')
+    $v = [double]$bytes; $i = 0
+    while ($v -ge 1024 -and $i -lt $unidades.Count - 1) { $v = $v / 1024; $i++ }
+    if ($i -eq 0) { return '{0} B' -f $bytes }
+    return [string]::Format($PtBr, '{0:N1} {1}', $v, $unidades[$i])
+}
+
+function Somar([object[]]$itens) {
+    $s = ($itens | Measure-Object -Property Tamanho -Sum).Sum
+    if ($null -eq $s) { return [int64]0 }
+    return [int64]$s
+}
+
+function Novo-RelatorioHtml {
+    param(
+        [object[]]$Plano,
+        [string]$Pasta,
+        [string]$Titulo,
+        [string]$Aviso,
+        # Só na execução: Origem -> @{ Status = 'OK'|'ERRO'; Detalhe = destino final ou mensagem }
+        [hashtable]$Resultado
+    )
+    $comStatus = $null -ne $Resultado
+    $porTipo = @{}
+    foreach ($t in 'Vazio', 'Duplicata', 'Versao', 'Categoria', 'SemCategoria', 'Pasta') {
+        $porTipo[$t] = @($Plano | Where-Object { $_.Tipo -eq $t })
+    }
+    $cartoes = @(
+        @{ Rotulo = 'Itens no plano';          Qtd = $Plano.Count;                     Bytes = (Somar $Plano);                   Nota = 'total a organizar' }
+        @{ Rotulo = 'Duplicatas idênticas';    Qtd = $porTipo['Duplicata'].Count;      Bytes = (Somar $porTipo['Duplicata']);    Nota = 'espaço que pode liberar' }
+        @{ Rotulo = 'Versões antigas';         Qtd = $porTipo['Versao'].Count;         Bytes = (Somar $porTipo['Versao']);       Nota = 'mantida só a mais nova' }
+        @{ Rotulo = 'Arquivos vazios';         Qtd = $porTipo['Vazio'].Count;          Bytes = $null;                            Nota = '0 bytes' }
+        @{ Rotulo = 'Sem categoria';           Qtd = $porTipo['SemCategoria'].Count;   Bytes = (Somar $porTipo['SemCategoria']); Nota = 'para você decidir' }
+    )
+    if ($comStatus) {
+        $falhos = @($Plano | Where-Object { $Resultado[$_.Origem].Status -ne 'OK' })
+        $cartoes += @{ Rotulo = 'Não movidos'; Qtd = $falhos.Count; Bytes = $null; Nota = 'geralmente arquivo aberto' }
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append(@'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="Organizar-Downloads">
+'@)
+    [void]$sb.AppendLine("<title>$(Html $Titulo)</title>")
+    [void]$sb.Append(@'
+<style>
+:root { --fundo:#f6f7fb; --papel:#fff; --texto:#1b2333; --suave:#5b6478; --linha:#e3e6ee; --marca:#0d1b3e; --destaque:#c9a84c; --alerta:#9a3412; }
+@media (prefers-color-scheme: dark) {
+  :root { --fundo:#0f1420; --papel:#171e2e; --texto:#e8ebf2; --suave:#a3abbd; --linha:#2a3347; --marca:#c9a84c; --destaque:#c9a84c; --alerta:#fdba74; }
+}
+* { box-sizing: border-box; }
+body { margin:0; font:15px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; background:var(--fundo); color:var(--texto); }
+main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+h1 { margin:0 0 4px; font-size:1.6rem; color:var(--marca); }
+h2 { margin:32px 0 8px; font-size:1.15rem; }
+.meta { margin:0; color:var(--suave); }
+.aviso { margin:16px 0; padding:12px 16px; border-left:4px solid var(--destaque); background:var(--papel); border-radius:6px; }
+.cartoes { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; margin:20px 0 0; padding:0; list-style:none; }
+.cartoes li { background:var(--papel); border:1px solid var(--linha); border-radius:8px; padding:12px 14px; }
+.cartoes strong { display:block; font-size:1.6rem; line-height:1.2; }
+.cartoes span { display:block; color:var(--suave); font-size:.85rem; }
+section { background:var(--papel); border:1px solid var(--linha); border-radius:8px; margin-top:16px; overflow-x:auto; }
+section h3 { margin:0; padding:10px 14px; font-size:1rem; border-bottom:1px solid var(--linha); }
+section h3 small { color:var(--suave); font-weight:normal; }
+table { width:100%; min-width:640px; border-collapse:collapse; font-size:.9rem; table-layout:fixed; }
+col.c-item { width:40%; } col.c-tam { width:12%; } col.c-data { width:18%; } col.c-motivo { width:30%; }
+th, td { text-align:left; padding:6px 14px; border-bottom:1px solid var(--linha); vertical-align:top; }
+th { color:var(--suave); font-weight:600; }
+td.num, th.num { text-align:right; white-space:nowrap; }
+td.nome { word-break:break-all; }
+td.erro { color:var(--alerta); font-weight:600; overflow-wrap:anywhere; }
+table.status col.c-item { width:30%; } table.status col.c-tam { width:10%; } table.status col.c-data { width:16%; }
+table.status col.c-motivo { width:24%; } table.status col.c-status { width:20%; }
+tr.sensivel td.nome::after { content:" · sensível"; color:var(--alerta); font-size:.8rem; }
+footer { margin-top:32px; color:var(--suave); font-size:.8rem; }
+@media print { body { background:#fff; } section, .cartoes li { break-inside:avoid; } }
+</style>
+</head>
+<body>
+<main>
+'@)
+    [void]$sb.AppendLine("<h1>$(Html $Titulo)</h1>")
+    [void]$sb.AppendLine("<p class=""meta"">Pasta: <code>$(Html $Pasta)</code> &middot; gerado em $(Get-Date -Format 'dd/MM/yyyy HH:mm')</p>")
+    if ($Aviso) { [void]$sb.AppendLine("<p class=""aviso"">$(Html $Aviso)</p>") }
+
+    [void]$sb.AppendLine('<ul class="cartoes" aria-label="Resumo">')
+    foreach ($c in $cartoes) {
+        $det = if ($null -ne $c.Bytes) { "$(Formatar-Tamanho $c.Bytes) &middot; $(Html $c.Nota)" } else { Html $c.Nota }
+        [void]$sb.AppendLine("<li><strong>$($c.Qtd)</strong>$(Html $c.Rotulo)<span>$det</span></li>")
+    }
+    [void]$sb.AppendLine('</ul>')
+
+    $subtitulo = if ($comStatus) { 'Para onde foi cada item' } else { 'Para onde vai cada item' }
+    [void]$sb.AppendLine("<h2>$subtitulo</h2>")
+    foreach ($g in ($Plano | Group-Object DestDir | Sort-Object Name)) {
+        $itens = @($g.Group | Sort-Object Nome)
+        [void]$sb.AppendLine('<section>')
+        [void]$sb.AppendLine("<h3>$(Html ($g.Name -replace '\\', ' / ')) <small>&middot; $($itens.Count) item(ns), $(Formatar-Tamanho (Somar $itens))</small></h3>")
+        $colStatus = ''; $thStatus = ''
+        if ($comStatus) { $colStatus = '<col class="c-status">'; $thStatus = '<th scope="col">Resultado</th>' }
+        $classeTabela = ''
+        if ($comStatus) { $classeTabela = ' class="status"' }
+        [void]$sb.AppendLine("<table$classeTabela><colgroup><col class=""c-item""><col class=""c-tam""><col class=""c-data""><col class=""c-motivo"">$colStatus</colgroup><thead><tr><th scope=""col"">Item</th><th scope=""col"" class=""num"">Tamanho</th><th scope=""col"">Modificado</th><th scope=""col"">Motivo</th>$thStatus</tr></thead><tbody>")
+        foreach ($p in $itens) {
+            $classe = if ($p.DestDir -like 'Sensível*') { ' class="sensivel"' } else { '' }
+            $nome = $p.Nome
+            if ($p.Tipo -eq 'Pasta') { $nome = "$nome/" }
+            $tdStatus = ''
+            if ($comStatus) {
+                $r = $Resultado[$p.Origem]
+                if ($r -and $r.Status -eq 'OK') {
+                    $tdStatus = "<td title=""$(Html $r.Detalhe)"">movido</td>"
+                } else {
+                    $msg = if ($r) { $r.Detalhe } else { 'não processado' }
+                    $tdStatus = "<td class=""erro"">ERRO: $(Html $msg)</td>"
+                }
+            }
+            [void]$sb.AppendLine(("<tr{0}><td class=""nome"">{1}</td><td class=""num"">{2}</td><td>{3}</td><td>{4}</td>{5}</tr>" -f
+                $classe, (Html $nome), (Formatar-Tamanho $p.Tamanho), $p.Modificado.ToString('dd/MM/yyyy HH:mm'), (Html $p.Motivo), $tdStatus))
+        }
+        [void]$sb.AppendLine('</tbody></table></section>')
+    }
+
+    [void]$sb.AppendLine('<footer>Organizar-Downloads &middot; nada é apagado: duplicatas e vazios vão para &ldquo;_Revisar e apagar&rdquo; e quem decide é você.</footer>')
+    [void]$sb.AppendLine('</main></body></html>')
+    return $sb.ToString()
+}
+
+function Gravar-Html([string]$caminho, [string]$conteudo) {
+    [IO.File]::WriteAllText($caminho, $conteudo, (New-Object System.Text.UTF8Encoding($false)))
+    if ($AbrirRelatorio) {
+        # Abrir é conveniência: se não houver navegador (servidor, sessão remota), só avisa.
+        try { Invoke-Item -LiteralPath $caminho } catch { Write-Warning "Não consegui abrir o relatório: $($_.Exception.Message)" }
+    }
+}
+
+# ============================================================================
 #  INVENTÁRIO
 # ============================================================================
 $euMesmo = $MyInvocation.MyCommand.Path
@@ -144,13 +309,32 @@ Write-Host ("Itens soltos na raiz: {0} arquivos, {1} pastas" -f $arquivos.Count,
 
 $plano = New-Object System.Collections.ArrayList
 $tratado = @{}
-function Planejar($item, [string]$dest, [string]$motivo) {
-    [void]$plano.Add([pscustomobject]@{ Origem = $item.FullName; DestDir = $dest; Motivo = $motivo })
+# Tamanho de uma pasta = soma dos arquivos dentro dela (para o relatório).
+function Tamanho-Item($item) {
+    if (-not $item.PSIsContainer) { return [int64]$item.Length }
+    $soma = (Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $soma) { return [int64]0 }
+    return [int64]$soma
+}
+
+# Cada item do plano guarda POR QUE foi para onde vai (Tipo), além do destino.
+# Tipo: Vazio | Duplicata | Versao | Categoria | SemCategoria | Pasta
+function Planejar($item, [string]$dest, [string]$motivo, [string]$tipo) {
+    [void]$plano.Add([pscustomobject]@{
+        Origem     = $item.FullName
+        Nome       = $item.Name
+        DestDir    = $dest
+        Motivo     = $motivo
+        Tipo       = $tipo
+        Tamanho    = (Tamanho-Item $item)
+        Modificado = $item.LastWriteTime
+    })
     $tratado[$item.FullName] = $true
 }
 
 # 1) Vazios
-foreach ($f in $arquivos) { if ($f.Length -eq 0) { Planejar $f "$LIX\Arquivos vazios" 'arquivo vazio (0 bytes)' } }
+foreach ($f in $arquivos) { if ($f.Length -eq 0) { Planejar $f "$LIX\Arquivos vazios" 'arquivo vazio (0 bytes)' 'Vazio' } }
 
 # 2) Duplicatas idênticas: mesmo tamanho e mesmo SHA-256
 Write-Host "Procurando duplicatas idênticas..."
@@ -167,7 +351,7 @@ foreach ($g in ($arquivos | Where-Object { -not $tratado.ContainsKey($_.FullName
         # Fica: o que tem categoria; o de nome sem "(1)"; o de nome mais curto; o mais antigo
         $fica = $lista | Sort-Object @{E={ [int]((Destino-Por-Regra $_.Name) -eq $REV) }}, @{E={ [int](Tem-MarcaDeCopia $_.Name) }}, @{E={ $_.Name.Length }}, LastWriteTime | Select-Object -First 1
         foreach ($f in $lista) {
-            if ($f.FullName -ne $fica.FullName) { Planejar $f "$LIX\Duplicatas idênticas" "cópia idêntica de: $($fica.Name)"; $nDup++ }
+            if ($f.FullName -ne $fica.FullName) { Planejar $f "$LIX\Duplicatas idênticas" "cópia idêntica de: $($fica.Name)" 'Duplicata'; $nDup++ }
         }
     }
 }
@@ -182,17 +366,20 @@ if (-not $SemVersoes) {
     foreach ($g in $comVersao) {
         $ord = @($g.Group | Sort-Object @{E={ $_.Ver.Versao }; Descending = $true}, @{E={ $_.Arq.LastWriteTime }; Descending = $true})
         for ($i = 1; $i -lt $ord.Count; $i++) {
-            Planejar $ord[$i].Arq "$($ord[$i].Dest)\$ANT" "versão antiga (mais recente: $($ord[0].Arq.Name))"
+            Planejar $ord[$i].Arq "$($ord[$i].Dest)\$ANT" "versão antiga (mais recente: $($ord[0].Arq.Name))" 'Versao'
             $nAnt++
         }
     }
 }
 foreach ($c in $restantes) {
-    if (-not $tratado.ContainsKey($c.Arq.FullName)) { Planejar $c.Arq $c.Dest 'classificado por tipo/nome' }
+    if (-not $tratado.ContainsKey($c.Arq.FullName)) {
+        $tipo = if ($c.Dest -eq $REV) { 'SemCategoria' } else { 'Categoria' }
+        Planejar $c.Arq $c.Dest 'classificado por tipo/nome' $tipo
+    }
 }
 
 # 4) Pastas soltas (ex.: zips já extraídos)
-foreach ($d in $pastas) { Planejar $d 'Pastas' 'pasta solta' }
+foreach ($d in $pastas) { Planejar $d 'Pastas' 'pasta solta' 'Pasta' }
 
 # ============================================================================
 #  RESUMO
@@ -211,8 +398,12 @@ if (-not $Executar) {
     $arq = Join-Path $PastaLog "plano-simulacao-$Agora.csv"
     $plano | Select-Object @{N='Item';E={ Split-Path -Leaf $_.Origem }}, @{N='Destino';E={ $_.DestDir }}, Motivo |
         Sort-Object Destino, Item | Export-Csv -LiteralPath $arq -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    $html = Join-Path $PastaLog "plano-simulacao-$Agora.html"
+    Gravar-Html $html (Novo-RelatorioHtml -Plano $plano -Pasta $Pasta -Titulo 'Simulação do Organizar-Downloads' `
+        -Aviso 'Simulação: nada foi movido. Confira o plano e rode de novo com -Executar para organizar de verdade.')
     Write-Host "SIMULAÇÃO: nada foi movido." -ForegroundColor Yellow
     Write-Host "Plano detalhado: $arq"
+    Write-Host "Relatório HTML:  $html"
     Write-Host "Para organizar de verdade, rode de novo com -Executar"
     return
 }
@@ -235,6 +426,15 @@ foreach ($p in $plano) {
 }
 $arqLog = Join-Path $PastaLog "log-$Agora.csv"
 $log | Export-Csv -LiteralPath $arqLog -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+
+$resultado = @{}
+foreach ($l in $log) {
+    $det = if ($l.Status -eq 'OK') { $l.Destino } else { $l.Motivo }
+    $resultado[$l.Origem] = @{ Status = $l.Status; Detalhe = $det }
+}
+$arqHtml = Join-Path $PastaLog "relatorio-$Agora.html"
+$avisoExec = if ($erros -gt 0) { "$erros item(ns) não foram movidos e continuam na raiz. Feche os arquivos abertos e rode de novo." } else { 'Tudo movido. Para voltar atrás, rode _Organização/Desfazer.ps1.' }
+Gravar-Html $arqHtml (Novo-RelatorioHtml -Plano $plano -Pasta $Pasta -Titulo 'Organizar-Downloads: o que foi feito' -Aviso $avisoExec -Resultado $resultado)
 
 $desfazer = @'
 # Desfazer.ps1 — devolve para a raiz tudo o que o Organizar-Downloads moveu (usa o log mais recente)
@@ -260,5 +460,6 @@ $arqDesfazer = Join-Path $PastaLog 'Desfazer.ps1'
 
 Write-Host ("Concluído: {0} itens movidos, {1} erros." -f $ok, $erros) -ForegroundColor Green
 Write-Host "Log: $arqLog"
+Write-Host "Relatório HTML: $arqHtml"
 Write-Host "Para desfazer: `"$arqDesfazer`""
 if ($erros -gt 0) { Write-Host "Itens com ERRO (geralmente arquivo aberto) ficaram na raiz; feche-os e rode de novo." -ForegroundColor Yellow }

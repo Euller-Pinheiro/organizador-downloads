@@ -36,7 +36,7 @@ Downloads/                         Downloads/
 
 | | |
 |---|---|
-| **Simulação por padrão** | Sem `-Executar`, nada é movido. Ele só mostra o plano e o grava em CSV, para você abrir no Excel. |
+| **Simulação por padrão** | Sem `-Executar`, nada é movido. Ele só mostra o plano e o grava em CSV (para abrir no Excel) e num **relatório HTML** (para ler no navegador). |
 | **Nunca apaga** | Duplicatas e arquivos vazios vão para `_Revisar e apagar`, e quem decide apagar é você. |
 | **Desfazer** | Toda execução grava `_Organização/log-*.csv` e um `Desfazer.ps1`, que devolve tudo para o lugar. |
 | **Idempotente** | Rodar de novo só mexe no que chegou depois. |
@@ -45,9 +45,9 @@ Downloads/                         Downloads/
 ## Como usar
 
 1. Baixe o [`Organizar-Downloads.ps1`](Organizar-Downloads.ps1) e salve na pasta Downloads.
-2. Abra o PowerShell nessa pasta e rode a **simulação**:
+2. Abra o PowerShell nessa pasta e rode a **simulação**, já abrindo o relatório:
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Organizar-Downloads.ps1
+   powershell -ExecutionPolicy Bypass -File .\Organizar-Downloads.ps1 -Simular -AbrirRelatorio
    ```
 3. Confira o plano. Se estiver como você quer, rode de verdade:
    ```powershell
@@ -61,8 +61,28 @@ Downloads/                         Downloads/
 | Parâmetro | O que faz |
 |---|---|
 | `-Pasta <caminho>` | Organiza outra pasta (o padrão é a Downloads do usuário). |
+| `-Simular` | Só simula (já é o padrão). Deixa a intenção explícita em atalhos e tarefas agendadas. Não aceita `-Executar` junto. |
 | `-Executar` | Move de verdade. Sem ele, só simula. |
+| `-AbrirRelatorio` | Abre o relatório HTML no navegador ao terminar. |
 | `-SemVersoes` | Não separa versões antigas. |
+
+## Relatório HTML
+
+Toda simulação grava `_Organização/plano-simulacao-<data>.html`, e toda execução grava `_Organização/relatorio-<data>.html`. É uma página só, que abre em qualquer navegador:
+
+- **Cartões de resumo:** quantos itens serão movidos, quantas duplicatas idênticas existem e **quanto espaço elas liberam**, quantas versões antigas, arquivos vazios e itens sem categoria.
+- **Uma tabela por destino:** cada arquivo com tamanho, data de modificação e o **motivo** da decisão (por exemplo, `cópia idêntica de: contrato.pdf` ou `versão antiga (mais recente: app-v1.10.zip)`). Certificados e chaves aparecem marcados como *sensível*.
+- **Na execução**, uma coluna a mais diz se o item foi movido ou, se deu erro, qual foi a mensagem (quase sempre um arquivo aberto em outro programa).
+
+### Decisões de projeto (e o que dá para aprender com elas)
+
+| Decisão | Por quê |
+|---|---|
+| **Todo nome de arquivo passa por `HtmlEncode`** | No Linux e no macOS um arquivo pode se chamar `<img src=x onerror=alert(1)>.txt`. Se o nome entrasse cru na página, o navegador executaria o código ao abrir o relatório: é *XSS* vindo de um lugar que ninguém imagina, o nome de um arquivo baixado da internet. O teste automatizado cria exatamente esse arquivo e confere que ele aparece como texto. |
+| **Sem JavaScript e sem nada externo** | A página funciona offline, pode ir por e-mail como anexo e não vaza para nenhum servidor quais arquivos você tem. |
+| **Tamanhos no formato brasileiro** | `1,5 MB` em vez de `1.5 MB`, sem depender do idioma do Windows de quem roda. |
+| **Tema escuro e impressão** | `prefers-color-scheme` acompanha o tema do sistema, e `@media print` evita cortar uma tabela no meio da página. |
+| **CSV continua existindo** | O HTML é para ler. O CSV é para filtrar, somar e cruzar no Excel. Os dois saem do mesmo plano, então nunca discordam (o teste confere que listam os mesmos itens). |
 
 ## Personalizando
 
@@ -80,10 +100,10 @@ Cada regra é uma expressão regular aplicada ao nome do arquivo, sem acentos e 
 
 ## Testes
 
-[`tests/Testar.ps1`](tests/Testar.ps1) monta uma pasta de teste com os casos difíceis: duplicatas, versões `v2`/`v10`, nomes com acentos em NFD, colchetes, colisão de nomes, arquivo vazio e pasta solta. Depois ele verifica quatro coisas:
+[`tests/Testar.ps1`](tests/Testar.ps1) monta uma pasta de teste com os casos difíceis: duplicatas, versões `v2`/`v10`, nomes com acentos em NFD, colchetes, colisão de nomes, arquivo vazio, pasta solta e nomes que precisam de escape no HTML (`&`, apóstrofo e, no Linux, `<img onerror=…>`). Depois ele verifica quatro coisas:
 
-1. a simulação não move nada;
-2. a execução põe cada arquivo no lugar certo **sem perder nenhum**, conferindo pelo hash;
+1. a simulação não move nada, e o relatório HTML lista os mesmos itens do CSV com todos os nomes escapados (e `-Simular -Executar` é recusado);
+2. a execução põe cada arquivo no lugar certo **sem perder nenhum**, conferindo pelo hash, e o relatório marca cada item como movido;
 3. rodar de novo não muda nada;
 4. o desfazer devolve **exatamente** o estado original.
 
@@ -106,15 +126,16 @@ Precisa de uma automação parecida para a sua empresa? [Fale com a ESX](https:/
 
 A PowerShell script that tidies up your **Downloads** folder: it sorts files into categories and separates **exact duplicates** (by SHA-256) and **older versions** (`v1.2` < `v1.10`, compared numerically). It **never deletes anything**.
 
-- **Dry-run by default:** nothing moves without `-Executar`. The plan is saved as a CSV.
+- **Dry-run by default:** nothing moves without `-Executar`. The plan is saved as a CSV and as a self-contained **HTML report** (summary cards, one table per destination, the reason for every decision). Every filename is HTML-encoded, so a file named `<img onerror=…>` cannot inject code into the report.
 - **Never deletes:** duplicates and empty files go to `_Revisar e apagar` ("review and delete").
 - **Undo:** every run writes a CSV log and a `Desfazer.ps1` ("undo") script.
 - **Idempotent and safe with any filename:** accents (NFC/NFD), brackets, name collisions.
 - Tested in CI on Windows PowerShell 5.1, PowerShell 7 on Windows, and PowerShell 7 on Linux.
 
 ```powershell
-.\Organizar-Downloads.ps1             # dry-run
-.\Organizar-Downloads.ps1 -Executar   # do it
+.\Organizar-Downloads.ps1                            # dry-run
+.\Organizar-Downloads.ps1 -Simular -AbrirRelatorio   # dry-run and open the HTML report
+.\Organizar-Downloads.ps1 -Executar                  # do it
 ```
 
 Folder and message names are in Portuguese. You can add your own rules in `$RegrasPessoais`.
