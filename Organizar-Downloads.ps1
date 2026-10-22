@@ -144,13 +144,32 @@ Write-Host ("Itens soltos na raiz: {0} arquivos, {1} pastas" -f $arquivos.Count,
 
 $plano = New-Object System.Collections.ArrayList
 $tratado = @{}
-function Planejar($item, [string]$dest, [string]$motivo) {
-    [void]$plano.Add([pscustomobject]@{ Origem = $item.FullName; DestDir = $dest; Motivo = $motivo })
+# Tamanho de uma pasta = soma dos arquivos dentro dela (para o relatório).
+function Tamanho-Item($item) {
+    if (-not $item.PSIsContainer) { return [int64]$item.Length }
+    $soma = (Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $soma) { return [int64]0 }
+    return [int64]$soma
+}
+
+# Cada item do plano guarda POR QUE foi para onde vai (Tipo), além do destino.
+# Tipo: Vazio | Duplicata | Versao | Categoria | SemCategoria | Pasta
+function Planejar($item, [string]$dest, [string]$motivo, [string]$tipo) {
+    [void]$plano.Add([pscustomobject]@{
+        Origem     = $item.FullName
+        Nome       = $item.Name
+        DestDir    = $dest
+        Motivo     = $motivo
+        Tipo       = $tipo
+        Tamanho    = (Tamanho-Item $item)
+        Modificado = $item.LastWriteTime
+    })
     $tratado[$item.FullName] = $true
 }
 
 # 1) Vazios
-foreach ($f in $arquivos) { if ($f.Length -eq 0) { Planejar $f "$LIX\Arquivos vazios" 'arquivo vazio (0 bytes)' } }
+foreach ($f in $arquivos) { if ($f.Length -eq 0) { Planejar $f "$LIX\Arquivos vazios" 'arquivo vazio (0 bytes)' 'Vazio' } }
 
 # 2) Duplicatas idênticas: mesmo tamanho e mesmo SHA-256
 Write-Host "Procurando duplicatas idênticas..."
@@ -167,7 +186,7 @@ foreach ($g in ($arquivos | Where-Object { -not $tratado.ContainsKey($_.FullName
         # Fica: o que tem categoria; o de nome sem "(1)"; o de nome mais curto; o mais antigo
         $fica = $lista | Sort-Object @{E={ [int]((Destino-Por-Regra $_.Name) -eq $REV) }}, @{E={ [int](Tem-MarcaDeCopia $_.Name) }}, @{E={ $_.Name.Length }}, LastWriteTime | Select-Object -First 1
         foreach ($f in $lista) {
-            if ($f.FullName -ne $fica.FullName) { Planejar $f "$LIX\Duplicatas idênticas" "cópia idêntica de: $($fica.Name)"; $nDup++ }
+            if ($f.FullName -ne $fica.FullName) { Planejar $f "$LIX\Duplicatas idênticas" "cópia idêntica de: $($fica.Name)" 'Duplicata'; $nDup++ }
         }
     }
 }
@@ -182,17 +201,20 @@ if (-not $SemVersoes) {
     foreach ($g in $comVersao) {
         $ord = @($g.Group | Sort-Object @{E={ $_.Ver.Versao }; Descending = $true}, @{E={ $_.Arq.LastWriteTime }; Descending = $true})
         for ($i = 1; $i -lt $ord.Count; $i++) {
-            Planejar $ord[$i].Arq "$($ord[$i].Dest)\$ANT" "versão antiga (mais recente: $($ord[0].Arq.Name))"
+            Planejar $ord[$i].Arq "$($ord[$i].Dest)\$ANT" "versão antiga (mais recente: $($ord[0].Arq.Name))" 'Versao'
             $nAnt++
         }
     }
 }
 foreach ($c in $restantes) {
-    if (-not $tratado.ContainsKey($c.Arq.FullName)) { Planejar $c.Arq $c.Dest 'classificado por tipo/nome' }
+    if (-not $tratado.ContainsKey($c.Arq.FullName)) {
+        $tipo = if ($c.Dest -eq $REV) { 'SemCategoria' } else { 'Categoria' }
+        Planejar $c.Arq $c.Dest 'classificado por tipo/nome' $tipo
+    }
 }
 
 # 4) Pastas soltas (ex.: zips já extraídos)
-foreach ($d in $pastas) { Planejar $d 'Pastas' 'pasta solta' }
+foreach ($d in $pastas) { Planejar $d 'Pastas' 'pasta solta' 'Pasta' }
 
 # ============================================================================
 #  RESUMO
