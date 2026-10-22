@@ -170,8 +170,11 @@ function Novo-RelatorioHtml {
         [object[]]$Plano,
         [string]$Pasta,
         [string]$Titulo,
-        [string]$Aviso
+        [string]$Aviso,
+        # Só na execução: Origem -> @{ Status = 'OK'|'ERRO'; Detalhe = destino final ou mensagem }
+        [hashtable]$Resultado
     )
+    $comStatus = $null -ne $Resultado
     $porTipo = @{}
     foreach ($t in 'Vazio', 'Duplicata', 'Versao', 'Categoria', 'SemCategoria', 'Pasta') {
         $porTipo[$t] = @($Plano | Where-Object { $_.Tipo -eq $t })
@@ -183,6 +186,10 @@ function Novo-RelatorioHtml {
         @{ Rotulo = 'Arquivos vazios';         Qtd = $porTipo['Vazio'].Count;          Bytes = $null;                            Nota = '0 bytes' }
         @{ Rotulo = 'Sem categoria';           Qtd = $porTipo['SemCategoria'].Count;   Bytes = (Somar $porTipo['SemCategoria']); Nota = 'para você decidir' }
     )
+    if ($comStatus) {
+        $falhos = @($Plano | Where-Object { $Resultado[$_.Origem].Status -ne 'OK' })
+        $cartoes += @{ Rotulo = 'Não movidos'; Qtd = $falhos.Count; Bytes = $null; Nota = 'geralmente arquivo aberto' }
+    }
 
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append(@'
@@ -220,6 +227,9 @@ th, td { text-align:left; padding:6px 14px; border-bottom:1px solid var(--linha)
 th { color:var(--suave); font-weight:600; }
 td.num, th.num { text-align:right; white-space:nowrap; }
 td.nome { word-break:break-all; }
+td.erro { color:var(--alerta); font-weight:600; overflow-wrap:anywhere; }
+table.status col.c-item { width:30%; } table.status col.c-tam { width:10%; } table.status col.c-data { width:16%; }
+table.status col.c-motivo { width:24%; } table.status col.c-status { width:20%; }
 tr.sensivel td.nome::after { content:" · sensível"; color:var(--alerta); font-size:.8rem; }
 footer { margin-top:32px; color:var(--suave); font-size:.8rem; }
 @media print { body { background:#fff; } section, .cartoes li { break-inside:avoid; } }
@@ -239,18 +249,33 @@ footer { margin-top:32px; color:var(--suave); font-size:.8rem; }
     }
     [void]$sb.AppendLine('</ul>')
 
-    [void]$sb.AppendLine('<h2>Para onde vai cada item</h2>')
+    $subtitulo = if ($comStatus) { 'Para onde foi cada item' } else { 'Para onde vai cada item' }
+    [void]$sb.AppendLine("<h2>$subtitulo</h2>")
     foreach ($g in ($Plano | Group-Object DestDir | Sort-Object Name)) {
         $itens = @($g.Group | Sort-Object Nome)
         [void]$sb.AppendLine('<section>')
         [void]$sb.AppendLine("<h3>$(Html ($g.Name -replace '\\', ' / ')) <small>&middot; $($itens.Count) item(ns), $(Formatar-Tamanho (Somar $itens))</small></h3>")
-        [void]$sb.AppendLine('<table><colgroup><col class="c-item"><col class="c-tam"><col class="c-data"><col class="c-motivo"></colgroup><thead><tr><th scope="col">Item</th><th scope="col" class="num">Tamanho</th><th scope="col">Modificado</th><th scope="col">Motivo</th></tr></thead><tbody>')
+        $colStatus = ''; $thStatus = ''
+        if ($comStatus) { $colStatus = '<col class="c-status">'; $thStatus = '<th scope="col">Resultado</th>' }
+        $classeTabela = ''
+        if ($comStatus) { $classeTabela = ' class="status"' }
+        [void]$sb.AppendLine("<table$classeTabela><colgroup><col class=""c-item""><col class=""c-tam""><col class=""c-data""><col class=""c-motivo"">$colStatus</colgroup><thead><tr><th scope=""col"">Item</th><th scope=""col"" class=""num"">Tamanho</th><th scope=""col"">Modificado</th><th scope=""col"">Motivo</th>$thStatus</tr></thead><tbody>")
         foreach ($p in $itens) {
             $classe = if ($p.DestDir -like 'Sensível*') { ' class="sensivel"' } else { '' }
             $nome = $p.Nome
             if ($p.Tipo -eq 'Pasta') { $nome = "$nome/" }
-            [void]$sb.AppendLine(("<tr{0}><td class=""nome"">{1}</td><td class=""num"">{2}</td><td>{3}</td><td>{4}</td></tr>" -f
-                $classe, (Html $nome), (Formatar-Tamanho $p.Tamanho), $p.Modificado.ToString('dd/MM/yyyy HH:mm'), (Html $p.Motivo)))
+            $tdStatus = ''
+            if ($comStatus) {
+                $r = $Resultado[$p.Origem]
+                if ($r -and $r.Status -eq 'OK') {
+                    $tdStatus = "<td title=""$(Html $r.Detalhe)"">movido</td>"
+                } else {
+                    $msg = if ($r) { $r.Detalhe } else { 'não processado' }
+                    $tdStatus = "<td class=""erro"">ERRO: $(Html $msg)</td>"
+                }
+            }
+            [void]$sb.AppendLine(("<tr{0}><td class=""nome"">{1}</td><td class=""num"">{2}</td><td>{3}</td><td>{4}</td>{5}</tr>" -f
+                $classe, (Html $nome), (Formatar-Tamanho $p.Tamanho), $p.Modificado.ToString('dd/MM/yyyy HH:mm'), (Html $p.Motivo), $tdStatus))
         }
         [void]$sb.AppendLine('</tbody></table></section>')
     }
@@ -402,6 +427,15 @@ foreach ($p in $plano) {
 $arqLog = Join-Path $PastaLog "log-$Agora.csv"
 $log | Export-Csv -LiteralPath $arqLog -NoTypeInformation -Encoding UTF8 -Delimiter ';'
 
+$resultado = @{}
+foreach ($l in $log) {
+    $det = if ($l.Status -eq 'OK') { $l.Destino } else { $l.Motivo }
+    $resultado[$l.Origem] = @{ Status = $l.Status; Detalhe = $det }
+}
+$arqHtml = Join-Path $PastaLog "relatorio-$Agora.html"
+$avisoExec = if ($erros -gt 0) { "$erros item(ns) não foram movidos e continuam na raiz. Feche os arquivos abertos e rode de novo." } else { 'Tudo movido. Para voltar atrás, rode _Organização/Desfazer.ps1.' }
+Gravar-Html $arqHtml (Novo-RelatorioHtml -Plano $plano -Pasta $Pasta -Titulo 'Organizar-Downloads: o que foi feito' -Aviso $avisoExec -Resultado $resultado)
+
 $desfazer = @'
 # Desfazer.ps1 — devolve para a raiz tudo o que o Organizar-Downloads moveu (usa o log mais recente)
 param([string]$Log = "")
@@ -426,5 +460,6 @@ $arqDesfazer = Join-Path $PastaLog 'Desfazer.ps1'
 
 Write-Host ("Concluído: {0} itens movidos, {1} erros." -f $ok, $erros) -ForegroundColor Green
 Write-Host "Log: $arqLog"
+Write-Host "Relatório HTML: $arqHtml"
 Write-Host "Para desfazer: `"$arqDesfazer`""
 if ($erros -gt 0) { Write-Host "Itens com ERRO (geralmente arquivo aberto) ficaram na raiz; feche-os e rode de novo." -ForegroundColor Yellow }
