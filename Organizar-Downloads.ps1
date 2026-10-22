@@ -16,14 +16,22 @@
 .PARAMETER Pasta
     Pasta a organizar. Padrão: Downloads do usuário.
 
+.PARAMETER Simular
+    Só simula (é o padrão). Existe para deixar a intenção explícita em atalhos e
+    tarefas agendadas. Não pode ser usado junto com -Executar.
+
 .PARAMETER Executar
     Sem ele, nada é movido (simulação).
+
+.PARAMETER AbrirRelatorio
+    Abre o relatório HTML no navegador padrão ao terminar.
 
 .PARAMETER SemVersoes
     Não separa versões antigas (mantém v1, v2, v3... lado a lado).
 
 .EXAMPLE
     .\Organizar-Downloads.ps1                 # simulação
+    .\Organizar-Downloads.ps1 -Simular -AbrirRelatorio   # simula e abre o relatório
     .\Organizar-Downloads.ps1 -Executar       # organiza de verdade
 
 .LINK
@@ -32,11 +40,16 @@
 [CmdletBinding()]
 param(
     [string]$Pasta = (Join-Path $HOME 'Downloads'),
+    [switch]$Simular,
     [switch]$Executar,
-    [switch]$SemVersoes
+    [switch]$SemVersoes,
+    [switch]$AbrirRelatorio
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Simular -and $Executar) {
+    throw 'Use -Simular OU -Executar, não os dois. Sem nenhum deles, o padrão é simular.'
+}
 $Pasta = (Resolve-Path -LiteralPath $Pasta).Path
 $PastaLog = Join-Path $Pasta '_Organização'
 $Agora = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -249,6 +262,10 @@ footer { margin-top:32px; color:var(--suave); font-size:.8rem; }
 
 function Gravar-Html([string]$caminho, [string]$conteudo) {
     [IO.File]::WriteAllText($caminho, $conteudo, (New-Object System.Text.UTF8Encoding($false)))
+    if ($AbrirRelatorio) {
+        # Abrir é conveniência: se não houver navegador (servidor, sessão remota), só avisa.
+        try { Invoke-Item -LiteralPath $caminho } catch { Write-Warning "Não consegui abrir o relatório: $($_.Exception.Message)" }
+    }
 }
 
 # ============================================================================
